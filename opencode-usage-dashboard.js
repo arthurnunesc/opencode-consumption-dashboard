@@ -517,7 +517,8 @@ const html = String.raw`<!doctype html>
     .table-wrap { overflow: auto; max-height: 560px; }
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { padding: 12px 10px; border-bottom: 1px solid var(--border); text-align: right; }
-    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+    th { text-align: center; }
+    td:first-child, td:nth-child(2) { text-align: left; }
     th {
       color: var(--muted-2);
       font-size: 12px;
@@ -529,19 +530,21 @@ const html = String.raw`<!doctype html>
       background: var(--panel);
       cursor: pointer;
       user-select: none;
+      padding-right: 22px;
     }
     th::after {
       content: "";
-      display: inline-block;
+      position: absolute;
+      right: 9px;
+      top: 50%;
       width: 0;
       height: 0;
-      margin-left: 4px;
-      vertical-align: middle;
       opacity: 0;
       transition: opacity 150ms ease;
       border-left: 4px solid transparent;
       border-right: 4px solid transparent;
       border-bottom: 5px solid transparent;
+      transform: translateY(-50%);
     }
     th:hover::after { opacity: 0.35; }
     th.sort-asc::after {
@@ -551,7 +554,7 @@ const html = String.raw`<!doctype html>
     th.sort-desc::after {
       opacity: 1;
       border-bottom-color: var(--muted);
-      transform: rotate(180deg);
+      transform: translateY(-50%) rotate(180deg);
     }
     td { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
