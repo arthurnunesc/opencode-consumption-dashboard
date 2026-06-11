@@ -446,12 +446,39 @@ const html = String.raw`<!doctype html>
       padding: 26px 28px;
       margin-bottom: 20px;
     }
+    .panel-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
     .panel-label {
       color: var(--muted);
       font-size: 14px;
       font-weight: 500;
-      margin-bottom: 18px;
       letter-spacing: -0.01em;
+    }
+    .view-toggle {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .view-toggle button {
+      border: 0;
+      border-radius: 999px;
+      padding: 6px 12px;
+      background: transparent;
+      color: var(--muted-2);
+      font: 500 12px/1 var(--font);
+      cursor: pointer;
+    }
+    .view-toggle button[aria-pressed="true"] {
+      background: var(--text);
+      color: var(--bg);
     }
 
     .chart-wrap { overflow-x: auto; padding-bottom: 6px; }
@@ -546,8 +573,8 @@ const html = String.raw`<!doctype html>
     th, td { padding: 12px 10px; border-bottom: 1px solid var(--border); text-align: right; }
     th { text-align: center; }
     th { white-space: nowrap; }
-    td:nth-child(10) { white-space: nowrap; }
-    td:first-child, td:nth-child(2) { text-align: left; }
+    .month-cell, .model-cell { text-align: left; }
+    .price-cell, .source-cell { white-space: nowrap; }
     th {
       color: var(--muted-2);
       font-size: 12px;
@@ -614,6 +641,7 @@ const html = String.raw`<!doctype html>
 
     @media (max-width: 760px) {
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .panel-heading { align-items: flex-start; flex-direction: column; }
       .card { padding: 18px 20px; }
       .card-value { font-size: clamp(18px, 5vw, 26px); }
       main { padding: 32px 16px 44px; }
@@ -643,7 +671,13 @@ const html = String.raw`<!doctype html>
     </div>
 
     <div class="panel" id="tablePanel">
-      <div class="panel-label">Details</div>
+      <div class="panel-heading">
+        <div class="panel-label">Details</div>
+        <div class="view-toggle" aria-label="Details view">
+          <button type="button" id="allTimeView" aria-pressed="true">All time</button>
+          <button type="button" id="perMonthView" aria-pressed="false">Per month</button>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -673,8 +707,10 @@ const html = String.raw`<!doctype html>
     var fmt = new Intl.NumberFormat();
     var money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 });
     function tokenTotal(row) { return row.inputTokens + row.outputTokens + row.reasoningTokens + row.cacheReadTokens + row.cacheWriteTokens; }
+    var rawTableRows = [];
     var tableRows = [];
-    var sortState = { key: "month", direction: "asc", type: "text" };
+    var viewMode = "all-time";
+    var sortState = { key: "modelLabel", direction: "asc", type: "text" };
 
     function escapeAttr(value) {
       return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -736,6 +772,91 @@ const html = String.raw`<!doctype html>
       return "<div class=\"card\"" + tooltipAttr + "><div class=\"card-label\">" + label + "</div><div class=\"card-value\">" + value + "</div>" + (context ? "<div class=\"card-context\">" + context + "</div>" : "") + "</div>";
     }
 
+    function formatModelName(model) {
+      return String(model || "").split("/").pop().toLowerCase();
+    }
+
+    function formatSourceName(source) {
+      if (source.indexOf("CommandCode") !== -1) return "CommandCode";
+      if (source.indexOf("OpenCode") !== -1) return "OpenCode";
+      if (source.indexOf("Provider") !== -1) return "Provider";
+      if (source.indexOf("Unavailable") !== -1) return "Unavailable";
+      return String(source || "-").split(/\s+/)[0];
+    }
+
+    function aggregateAllTime(rows) {
+      var grouped = {};
+      rows.forEach(function(row) {
+        var key = row.provider + "\t" + row.model;
+        var current = grouped[key];
+        if (!current) {
+          current = Object.assign({}, row, { priceSources: {} });
+          current.month = "";
+          grouped[key] = current;
+        } else {
+          current.calls += row.calls;
+          current.inputTokens += row.inputTokens;
+          current.outputTokens += row.outputTokens;
+          current.reasoningTokens += row.reasoningTokens;
+          current.cacheReadTokens += row.cacheReadTokens;
+          current.cacheWriteTokens += row.cacheWriteTokens;
+          current.cost += row.cost;
+          current.calculatedCost += row.calculatedCost;
+        }
+        String(row.priceSource || "").split(", ").forEach(function(source) {
+          if (source) current.priceSources[source] = true;
+        });
+      });
+
+      return Object.values(grouped).map(function(row) {
+        row.priceSource = Object.keys(row.priceSources).join(", ");
+        delete row.priceSources;
+        return row;
+      });
+    }
+
+    function prepareTableRows() {
+      var sourceRows = viewMode === "all-time" ? aggregateAllTime(rawTableRows) : rawTableRows;
+      tableRows = sourceRows.map(function(row) {
+        var r = Object.assign({}, row);
+        r.modelLabel = formatModelName(row.model);
+        r.sourceLabel = formatSourceName(row.priceSource);
+        r.totalTokens = tokenTotal(row);
+        return r;
+      });
+    }
+
+    function renderTableHeader() {
+      var monthHeader = viewMode === "per-month" ? "<th data-key=\"month\" data-type=\"text\">Month</th>" : "";
+      document.querySelector("#tablePanel thead tr").innerHTML = monthHeader + "<th data-key=\"modelLabel\" data-type=\"text\">Model</th><th data-key=\"calls\" data-type=\"number\">Calls</th><th data-key=\"inputTokens\" data-type=\"number\">Input</th><th data-key=\"outputTokens\" data-type=\"number\">Output</th><th data-key=\"reasoningTokens\" data-type=\"number\">Reasoning</th><th data-key=\"cacheReadTokens\" data-type=\"number\">Cache Rd</th><th data-key=\"cacheWriteTokens\" data-type=\"number\">Cache Wr</th><th data-key=\"totalTokens\" data-type=\"number\">Total</th><th data-key=\"calculatedCost\" data-type=\"number\">Price</th><th data-key=\"sourceLabel\" data-type=\"text\">Source</th>";
+
+      document.querySelectorAll("th[data-key]").forEach(function(th) {
+        th.addEventListener("click", function() {
+          var key = th.dataset.key;
+          var type = th.dataset.type;
+          sortState = {
+            key: key,
+            type: type,
+            direction: sortState.key === key && sortState.direction === "desc" ? "asc" : "desc",
+          };
+          renderRows();
+        });
+      });
+    }
+
+    function setViewMode(nextMode) {
+      if (viewMode === nextMode) return;
+      viewMode = nextMode;
+      if (viewMode === "all-time" && sortState.key === "month") {
+        sortState = { key: "modelLabel", direction: "asc", type: "text" };
+      }
+      document.getElementById("allTimeView").setAttribute("aria-pressed", String(viewMode === "all-time"));
+      document.getElementById("perMonthView").setAttribute("aria-pressed", String(viewMode === "per-month"));
+      prepareTableRows();
+      renderTableHeader();
+      renderRows();
+    }
+
     function render(data) {
       var modelColors = {};
       data.models.forEach(function(model, i) { modelColors[model] = colors[i % colors.length]; });
@@ -788,25 +909,11 @@ const html = String.raw`<!doctype html>
 
       document.getElementById("chartPanel").innerHTML = "<div class=\"panel-label\">Monthly Breakdown</div><div class=\"chart-wrap\"><div class=\"chart\"><div class=\"axis\">" + marks + "</div><div class=\"plot\">" + bars + "</div><div class=\"x-axis\">" + labels + "</div></div></div><div class=\"legend\">" + legend + "</div>";
 
-      tableRows = data.rows.map(function(row) {
-        var r = Object.assign({}, row);
-        r.modelLabel = row.provider + "/" + row.model;
-        r.totalTokens = tokenTotal(row);
-        return r;
-      });
-
-      document.querySelectorAll("th[data-key]").forEach(function(th) {
-        th.addEventListener("click", function() {
-          var key = th.dataset.key;
-          var type = th.dataset.type;
-          sortState = {
-            key: key,
-            type: type,
-            direction: sortState.key === key && sortState.direction === "desc" ? "asc" : "desc",
-          };
-          renderRows();
-        });
-      });
+      rawTableRows = data.rows;
+      prepareTableRows();
+      renderTableHeader();
+      document.getElementById("allTimeView").addEventListener("click", function() { setViewMode("all-time"); });
+      document.getElementById("perMonthView").addEventListener("click", function() { setViewMode("per-month"); });
 
       renderRows();
     }
@@ -825,7 +932,8 @@ const html = String.raw`<!doctype html>
       if (activeTh) activeTh.classList.add(sortState.direction === "asc" ? "sort-asc" : "sort-desc");
 
       document.getElementById("rows").innerHTML = rows.map(function(row) {
-        return "<tr><td>" + row.month + "</td><td>" + (row.provider + "/" + row.model) + "</td><td>" + fmt.format(row.calls) + "</td><td>" + fmt.format(row.inputTokens) + "</td><td>" + fmt.format(row.outputTokens) + "</td><td>" + fmt.format(row.reasoningTokens) + "</td><td>" + fmt.format(row.cacheReadTokens) + "</td><td>" + fmt.format(row.cacheWriteTokens) + "</td><td>" + fmt.format(row.totalTokens) + "</td><td>" + formatTableMoney(row.calculatedCost) + "</td><td>" + row.priceSource + "</td></tr>";
+        var monthCell = viewMode === "per-month" ? "<td class=\"month-cell\">" + row.month + "</td>" : "";
+        return "<tr>" + monthCell + "<td class=\"model-cell\">" + row.modelLabel + "</td><td>" + fmt.format(row.calls) + "</td><td>" + fmt.format(row.inputTokens) + "</td><td>" + fmt.format(row.outputTokens) + "</td><td>" + fmt.format(row.reasoningTokens) + "</td><td>" + fmt.format(row.cacheReadTokens) + "</td><td>" + fmt.format(row.cacheWriteTokens) + "</td><td>" + fmt.format(row.totalTokens) + "</td><td class=\"price-cell\">" + formatTableMoney(row.calculatedCost) + "</td><td class=\"source-cell\">" + row.sourceLabel + "</td></tr>";
       }).join("");
     }
 
