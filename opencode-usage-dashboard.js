@@ -101,6 +101,7 @@ function aggregateUsage() {
   const dailyData = new Map();
   const modelTotals = new Map();
   let latestTimestamp = 0;
+  let earliestTimestamp = Infinity;
 
   for (let start = 1; start <= maxRow; start += 500) {
     const end = start + 499;
@@ -130,6 +131,7 @@ function aggregateUsage() {
 
       const timestamp = Number(row.time_created);
       if (timestamp > latestTimestamp) latestTimestamp = timestamp;
+      if (timestamp < earliestTimestamp) earliestTimestamp = timestamp;
 
       const provider = data.providerID ?? "unknown";
       const model = data.modelID ?? "unknown";
@@ -236,6 +238,10 @@ function aggregateUsage() {
       if (v.tokens > busiestDay.tokens) busiestDay = { date: d, tokens: v.tokens };
     }
 
+    const lifetimeMs = latestTimestamp - earliestTimestamp;
+    const lifetimeDays = Math.max(1, Math.ceil(lifetimeMs / 86400000));
+    const allTimeTokens = totals.inputTokens + totals.outputTokens + totals.reasoningTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+
     thirtyDay = {
       totalTokens: tdTokens,
       totalCost: tdCost,
@@ -245,6 +251,9 @@ function aggregateUsage() {
       busiestDay: busiestDay.date,
       busiestDayTokens: busiestDay.tokens,
       activeDays: activeDays,
+      lifetimeTypical30dCost: (totals.calculatedCost / lifetimeDays) * 30,
+      lifetimeTypical30dTokens: Math.round((allTimeTokens / lifetimeDays) * 30),
+      lifetimeDays: lifetimeDays,
     };
 
     dailyBreakdown = thirtyDayEntries
@@ -615,21 +624,22 @@ const html = String.raw`<!doctype html>
 
       var cardHtml = "";
 
-      cardHtml += cardMarkup("All-Time Tokens", fmt.format(grandTotal), data.rows.length + " entries across " + data.months.length + " months");
-
-      cardHtml += cardMarkup("All-Time Cost", money.format(data.totals.calculatedCost), "Calculated from provider pricing");
-
       if (data.thirtyDay) {
         var td = data.thirtyDay;
-        cardHtml += cardMarkup("30d Avg Tokens/Day", fmt.format(td.avgDailyTokens), td.activeDays + " active days");
-        cardHtml += cardMarkup("30d Avg Cost/Day", money.format(td.avgDailyCost), td.activeDays + " active days");
-        cardHtml += cardMarkup("30d Cost / 1M Tokens", money.format(td.costPerMillionTokens), "Effective blended rate");
-        cardHtml += cardMarkup("30d Peak Day", fmt.format(td.busiestDayTokens), td.busiestDay !== "-" ? td.busiestDay : "No data");
+        cardHtml += cardMarkup("All-Time Cost", money.format(data.totals.calculatedCost), "Across all sessions");
+        cardHtml += cardMarkup("Typical 30d Cost", money.format(td.lifetimeTypical30dCost), "Projected from " + td.lifetimeDays + "d lifetime avg");
+        cardHtml += cardMarkup("30d Avg Cost/Day", money.format(td.avgDailyCost), "Last 30 days, " + td.activeDays + " active days");
+
+        cardHtml += cardMarkup("All-Time Tokens", fmt.format(grandTotal), data.months.length + " months, " + data.rows.length + " model-entries");
+        cardHtml += cardMarkup("Typical 30d Tokens", fmt.format(td.lifetimeTypical30dTokens), "Projected from " + td.lifetimeDays + "d lifetime avg");
+        cardHtml += cardMarkup("30d Avg Tokens/Day", fmt.format(td.avgDailyTokens), "Last 30 days, " + td.activeDays + " active days");
       } else {
-        cardHtml += cardMarkup("30d Avg Tokens/Day", "-", "No data");
+        cardHtml += cardMarkup("All-Time Cost", "-", "No data");
+        cardHtml += cardMarkup("Typical 30d Cost", "-", "No data");
         cardHtml += cardMarkup("30d Avg Cost/Day", "-", "No data");
-        cardHtml += cardMarkup("30d Cost / 1M Tokens", "-", "No data");
-        cardHtml += cardMarkup("30d Peak Day", "-", "No data");
+        cardHtml += cardMarkup("All-Time Tokens", "-", "No data");
+        cardHtml += cardMarkup("Typical 30d Tokens", "-", "No data");
+        cardHtml += cardMarkup("30d Avg Tokens/Day", "-", "No data");
       }
 
       document.getElementById("cards").innerHTML = cardHtml;
