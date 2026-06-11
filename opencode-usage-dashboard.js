@@ -548,6 +548,28 @@ const html = String.raw`<!doctype html>
       transition: filter 120ms ease;
     }
     .segment:hover { filter: brightness(1.15) saturate(1.1); }
+    .chart-tooltip {
+      position: fixed;
+      z-index: 20;
+      max-width: min(320px, calc(100vw - 48px));
+      padding: 8px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      background: #27272a;
+      color: var(--text);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      font-size: 13px;
+      line-height: 1.35;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(10px, 8px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+    .chart-tooltip.is-visible {
+      opacity: 1;
+      transform: translate(10px, 0);
+    }
     .x-axis {
       grid-column: 2;
       grid-row: 2;
@@ -705,7 +727,6 @@ const html = String.raw`<!doctype html>
   <script>
     var colors = ["#a5d8ff","#ffc9de","#b2f2bb","#ffd8a8","#d0bfff","#96f2d7","#99e9f2","#fcc2d7","#b2ddff","#ffb3ba","#d4f0c0","#ffe0b2"];
     var fmt = new Intl.NumberFormat();
-    var money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 });
     function tokenTotal(row) { return row.inputTokens + row.outputTokens + row.reasoningTokens + row.cacheReadTokens + row.cacheWriteTokens; }
     var rawTableRows = [];
     var tableRows = [];
@@ -857,6 +878,32 @@ const html = String.raw`<!doctype html>
       renderRows();
     }
 
+    function attachChartTooltips() {
+      var tooltip = document.getElementById("chartTooltip");
+      if (!tooltip) return;
+
+      document.querySelectorAll(".segment[data-tooltip]").forEach(function(segment) {
+        segment.addEventListener("mouseenter", function(event) {
+          tooltip.textContent = segment.dataset.tooltip;
+          tooltip.classList.add("is-visible");
+          moveChartTooltip(event, tooltip);
+        });
+        segment.addEventListener("mousemove", function(event) {
+          moveChartTooltip(event, tooltip);
+        });
+        segment.addEventListener("mouseleave", function() {
+          tooltip.classList.remove("is-visible");
+        });
+      });
+    }
+
+    function moveChartTooltip(event, tooltip) {
+      var x = Math.min(event.clientX + 12, window.innerWidth - tooltip.offsetWidth - 12);
+      var y = Math.max(12, event.clientY - tooltip.offsetHeight - 12);
+      tooltip.style.left = x + "px";
+      tooltip.style.top = y + "px";
+    }
+
     function render(data) {
       var modelColors = {};
       data.models.forEach(function(model, i) { modelColors[model] = colors[i % colors.length]; });
@@ -898,8 +945,7 @@ const html = String.raw`<!doctype html>
         var segments = data.rows.filter(function(r) { return r.month === month; }).map(function(row) {
           var model = row.provider + "/" + row.model;
           var segH = tokenTotal(row) / monthTotals[month] * 100;
-          var title = month + "  " + model + "\nTotal: " + fmt.format(tokenTotal(row)) + "  Input: " + fmt.format(row.inputTokens) + "  Output: " + fmt.format(row.outputTokens) + "\nCost: " + money.format(row.calculatedCost) + "  Source: " + row.priceSource;
-          return "<div class=\"segment\" title=\"" + title + "\" style=\"height:" + segH + "%;background:" + modelColors[model] + "\"></div>";
+          return "<div class=\"segment\" data-tooltip=\"" + escapeAttr(formatModelName(row.model)) + "\" aria-label=\"" + escapeAttr(formatModelName(row.model)) + "\" style=\"height:" + segH + "%;background:" + modelColors[model] + "\"></div>";
         }).join("");
         return "<div class=\"bar-group\"><div class=\"bar\" style=\"height:" + height + "%\">" + segments + "</div></div>";
       }).join("");
@@ -907,7 +953,8 @@ const html = String.raw`<!doctype html>
       var labels = data.months.map(function(month) { return "<div>" + month + "</div>"; }).join("");
       var legend = data.models.map(function(m) { return "<span><i class=\"swatch\" style=\"background:" + modelColors[m] + "\"></i>" + m + "</span>"; }).join("");
 
-      document.getElementById("chartPanel").innerHTML = "<div class=\"panel-label\">Monthly Breakdown</div><div class=\"chart-wrap\"><div class=\"chart\"><div class=\"axis\">" + marks + "</div><div class=\"plot\">" + bars + "</div><div class=\"x-axis\">" + labels + "</div></div></div><div class=\"legend\">" + legend + "</div>";
+      document.getElementById("chartPanel").innerHTML = "<div class=\"panel-label\">Monthly Breakdown</div><div class=\"chart-wrap\"><div class=\"chart\"><div class=\"axis\">" + marks + "</div><div class=\"plot\">" + bars + "</div><div class=\"x-axis\">" + labels + "</div></div></div><div class=\"legend\">" + legend + "</div><div class=\"chart-tooltip\" id=\"chartTooltip\" role=\"tooltip\"></div>";
+      attachChartTooltips();
 
       rawTableRows = data.rows;
       prepareTableRows();
