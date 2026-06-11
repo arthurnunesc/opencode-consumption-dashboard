@@ -710,7 +710,7 @@ const html = String.raw`<!doctype html>
     var rawTableRows = [];
     var tableRows = [];
     var viewMode = "all-time";
-    var sortState = { key: "modelLabel", direction: "asc", type: "text" };
+    var sortState = { key: "calculatedCost", direction: "desc", type: "number" };
 
     function escapeAttr(value) {
       return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -749,21 +749,21 @@ const html = String.raw`<!doctype html>
       var abs = Math.abs(n);
       if (abs >= 1e9) {
         var b = truncate(n / 1e9, 2);
-        return "US$ " + b.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " billion";
+        return "USD " + b.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " billion";
       }
       if (abs >= 1e6) {
         var m = truncate(n / 1e6, 2);
-        return "US$ " + m.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " million";
+        return "USD " + m.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " million";
       }
-      return "US$ " + truncate(n, 2).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return "USD " + truncate(n, 2).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function formatFullMoney(n) {
-      return "US$ " + formatExactNumber(n);
+      return "USD " + formatExactNumber(n);
     }
 
     function formatTableMoney(n) {
-      return "US$ " + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return "USD " + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function cardMarkup(label, value, context, tooltip) {
@@ -848,7 +848,7 @@ const html = String.raw`<!doctype html>
       if (viewMode === nextMode) return;
       viewMode = nextMode;
       if (viewMode === "all-time" && sortState.key === "month") {
-        sortState = { key: "modelLabel", direction: "asc", type: "text" };
+        sortState = { key: "calculatedCost", direction: "desc", type: "number" };
       }
       document.getElementById("allTimeView").setAttribute("aria-pressed", String(viewMode === "all-time"));
       document.getElementById("perMonthView").setAttribute("aria-pressed", String(viewMode === "per-month"));
