@@ -1,29 +1,45 @@
 #!/usr/bin/env bun
 
 import { Database } from "bun:sqlite";
+import { readFileSync } from "fs";
 
 const DB_PATH = process.env.OPENCODE_DB ?? `${process.env.HOME}/.local/share/opencode/opencode.db`;
+const MODELS_JSON = process.env.MODELS_JSON ?? `${process.env.HOME}/.cache/opencode/models.json`;
 const PORT = Number(process.env.PORT ?? 8765);
-const OPENAI_PRICING_PER_MILLION = {
-  "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30 },
-  "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15 },
-  "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
-  "gpt-5.4-nano": { input: 0.2, cachedInput: 0.02, output: 1.25 },
-  "gpt-5.3-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
-};
-const MINIMAX_CNY_PER_USD = Number(process.env.MINIMAX_CNY_PER_USD ?? 7.1);
-const MINIMAX_PRICING_PER_MILLION_CNY = {
-  "minimax-m2.7": { input: 2.1, output: 8.4, cacheRead: 0.42, cacheWrite: 2.625 },
-  "minimax-m2.7-highspeed": { input: 4.2, output: 16.8, cacheRead: 0.42, cacheWrite: 2.625 },
-  "minimax-m2.5": { input: 2.1, output: 8.4, cacheRead: 0.21, cacheWrite: 2.625 },
-  "minimax-m2.5-highspeed": { input: 4.2, output: 16.8, cacheRead: 0.21, cacheWrite: 2.625 },
-};
-const GEMINI_PRICING_PER_MILLION = {
-  "gemini-3.1-pro-preview": {
-    short: { input: 2, cachedInput: 0.2, output: 12 },
-    long: { input: 4, cachedInput: 0.4, output: 18 },
-    threshold: 200_000,
-  },
+
+const COMMANDCODE_PRICING = {
+  "deepseek-v4-pro":             { input: 0.435, output: 0.87, cacheRead: 0.003625 },
+  "deepseek-v4-flash":           { input: 0.14, output: 0.28, cacheRead: 0.0028 },
+  "kimi-k2.6":                   { input: 0.95, output: 4.00, cacheRead: 0.16 },
+  "kimi-k2.5":                   { input: 0.60, output: 3.00, cacheRead: 0.10 },
+  "glm-5.1":                     { input: 1.40, output: 4.40, cacheRead: 0.26 },
+  "glm-5":                       { input: 1.00, output: 3.20, cacheRead: 0.20 },
+  "minimax-m3":                  { input: 0.30, output: 1.20, cacheRead: 0.06 },
+  "minimax-m2.7":                { input: 0.30, output: 1.20, cacheRead: 0.06 },
+  "minimax-m2.5":                { input: 0.30, output: 1.20, cacheRead: 0.03 },
+  "qwen-3.6-max-preview":       { input: 1.30, output: 7.80, cacheRead: 0.26, cacheWrite: 1.63 },
+  "qwen-3.6-plus":              { input: 0.50, output: 3.00, cacheRead: 0.10 },
+  "qwen-3.7-max":               { input: 2.50, output: 7.50, cacheRead: 0.50, cacheWrite: 3.13 },
+  "qwen-3.7-plus":              { input: 0.40, output: 1.60, cacheRead: 0.08, cacheWrite: 0.50 },
+  "step-3.7-flash":             { input: 0.20, output: 1.15, cacheRead: 0.04 },
+  "step-3.5-flash":             { input: 0.10, output: 0.30, cacheRead: 0.02 },
+  "mimo-v2.5-pro":              { input: 0.435, output: 0.87, cacheRead: 0.0036 },
+  "mimo-v2.5":                  { input: 0.14, output: 0.28, cacheRead: 0.0028 },
+  "nemotron-3-ultra":           { input: 0.37, output: 1.08, cacheRead: 0.14 },
+  "claude-fable-5":             { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.50 },
+  "claude-opus-4.8":            { input: 5, output: 25, cacheRead: 0.50, cacheWrite: 6.25 },
+  "claude-opus-4.7":            { input: 5, output: 25, cacheRead: 0.50, cacheWrite: 6.25 },
+  "claude-opus-4.6":            { input: 5, output: 25, cacheRead: 0.50, cacheWrite: 6.25 },
+  "claude-sonnet-4.6":          { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75 },
+  "claude-sonnet-4.5":          { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75 },
+  "claude-haiku-4.5":           { input: 1, output: 5, cacheRead: 0.10, cacheWrite: 1.25 },
+  "gpt-5.5":                    { input: 5, output: 30, cacheRead: 0.50 },
+  "gpt-5.5-fast":               { input: 12.50, output: 75, cacheRead: 1.25 },
+  "gpt-5.4":                    { input: 2.50, output: 15, cacheRead: 0.25 },
+  "gpt-5.4-mini":               { input: 0.75, output: 4.50, cacheRead: 0.075 },
+  "gpt-5.3-codex":              { input: 2, output: 8, cacheRead: 0.50 },
+  "gemini-3.5-flash":           { input: 1.50, output: 9, cacheRead: 0.15 },
+  "gemini-3.1-flash-lite":      { input: 0.25, output: 1.50, cacheRead: 0.03 },
 };
 
 function monthKey(timestamp) {
@@ -36,62 +52,80 @@ function dayKey(timestamp) {
   return date.getUTCFullYear() + "-" + String(date.getUTCMonth() + 1).padStart(2, "0") + "-" + String(date.getUTCDate()).padStart(2, "0");
 }
 
-function normalizedModel(model) {
-  return String(model).toLowerCase();
+function normalizeModelId(provider, model) {
+  let id = String(model).toLowerCase();
+  if (provider === "commandcode") {
+    id = id.replace(/^.*\//, "");
+    id = id.replace(/^qwen(\d)/, "qwen-$1");
+  }
+  return id;
+}
+
+function loadModelsJsonPricing() {
+  try {
+    const raw = readFileSync(MODELS_JSON, "utf-8");
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") throw new Error("Invalid JSON");
+
+    const map = new Map();
+
+    for (const providerKey of ["openai", "google", "opencode", "opencode-go"]) {
+      const provider = data[providerKey];
+      if (!provider || !provider.models) continue;
+      for (const [modelId, modelData] of Object.entries(provider.models)) {
+        if (!modelData.cost) continue;
+        const key = modelId.toLowerCase();
+        if (map.has(key)) continue;
+        map.set(key, {
+          input: Number(modelData.cost.input ?? 0),
+          output: Number(modelData.cost.output ?? 0),
+          cacheRead: Number(modelData.cost.cache_read ?? 0),
+          cacheWrite: Number(modelData.cost.cache_write ?? 0),
+        });
+      }
+    }
+
+    return map;
+  } catch (_e) {
+    return null;
+  }
+}
+
+const MODELS_JSON_PRICING = loadModelsJsonPricing();
+
+export { DB_PATH, MODELS_JSON, COMMANDCODE_PRICING, MODELS_JSON_PRICING, normalizeModelId, loadModelsJsonPricing, calculateCostFromPricing, calculateMessageCost, aggregateUsage, monthKey, dayKey }; 
+
+function calculateCostFromPricing(pricing, tokens) {
+  return (
+    (tokens.input * pricing.input +
+      tokens.output * pricing.output +
+      tokens.reasoning * pricing.output +
+      tokens.cacheRead * (pricing.cacheRead ?? 0) +
+      tokens.cacheWrite * (pricing.cacheWrite ?? 0)) /
+    1_000_000
+  );
 }
 
 function calculateMessageCost(provider, model, tokens, recordedCost) {
-  const modelKey = normalizedModel(model);
-  const openai = provider === "openai" ? OPENAI_PRICING_PER_MILLION[modelKey] : undefined;
-
-  if (openai) {
-    return {
-      cost:
-        ((tokens.input + tokens.cacheWrite) * openai.input +
-          tokens.cacheRead * openai.cachedInput +
-          (tokens.output + tokens.reasoning) * openai.output) /
-        1_000_000,
-      source: "OpenAI pricing",
-    };
+  if (recordedCost > 0) {
+    return { cost: recordedCost, source: "Recorded by OpenCode" };
   }
 
-  const minimax = provider.includes("minimax") || modelKey.includes("minimax")
-    ? MINIMAX_PRICING_PER_MILLION_CNY[modelKey.replace(/^minimax-/, "minimax-")]
-    : undefined;
+  const modelKey = normalizeModelId(provider, model);
 
-  if (minimax) {
-    const cny =
-      (tokens.input * minimax.input +
-        tokens.output * minimax.output +
-        tokens.reasoning * minimax.output +
-        tokens.cacheRead * minimax.cacheRead +
-        tokens.cacheWrite * minimax.cacheWrite) /
-      1_000_000;
-
-    return {
-      cost: cny / MINIMAX_CNY_PER_USD,
-      source: "MiniMax pricing, CNY/USD " + MINIMAX_CNY_PER_USD,
-    };
+  const ccPrice = COMMANDCODE_PRICING[modelKey];
+  if (ccPrice) {
+    return { cost: calculateCostFromPricing(ccPrice, tokens), source: "CommandCode pricing" };
   }
 
-  const gemini = provider === "google" ? GEMINI_PRICING_PER_MILLION[modelKey] : undefined;
-
-  if (gemini) {
-    const price = tokens.input + tokens.cacheRead + tokens.cacheWrite > gemini.threshold ? gemini.long : gemini.short;
-    return {
-      cost:
-        ((tokens.input + tokens.cacheWrite) * price.input +
-          tokens.cacheRead * price.cachedInput +
-          (tokens.output + tokens.reasoning) * price.output) /
-        1_000_000,
-      source: "Google Gemini pricing",
-    };
+  if (MODELS_JSON_PRICING) {
+    const price = MODELS_JSON_PRICING.get(modelKey);
+    if (price) {
+      return { cost: calculateCostFromPricing(price, tokens), source: "Provider pricing (models.json)" };
+    }
   }
 
-  return {
-    cost: recordedCost,
-    source: recordedCost > 0 ? "Recorded by OpenCode" : "Unavailable",
-  };
+  return { cost: 0, source: "Unavailable" };
 }
 
 function aggregateUsage() {
@@ -749,24 +783,26 @@ const html = String.raw`<!doctype html>
 </body>
 </html>`;
 
-Bun.serve({
-  port: PORT,
-  fetch(request) {
-    const url = new URL(request.url);
+if (import.meta.main) {
+  Bun.serve({
+    port: PORT,
+    fetch(request) {
+      const url = new URL(request.url);
 
-    if (url.pathname === "/api/usage") {
-      try {
-        return Response.json(aggregateUsage());
-      } catch (error) {
-        return Response.json({ error: error.message }, { status: 500 });
+      if (url.pathname === "/api/usage") {
+        try {
+          return Response.json(aggregateUsage());
+        } catch (error) {
+          return Response.json({ error: error.message }, { status: 500 });
+        }
       }
-    }
 
-    return new Response(html, {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    });
-  },
-});
+      return new Response(html, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    },
+  });
 
-console.log("OpenCode usage dashboard: http://localhost:" + PORT);
-console.log("database: " + DB_PATH);
+  console.log("OpenCode usage dashboard: http://localhost:" + PORT);
+  console.log("database: " + DB_PATH);
+}
