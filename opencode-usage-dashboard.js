@@ -279,14 +279,14 @@ function aggregateUsage() {
     thirtyDay = {
       totalTokens: tdTokens,
       totalCost: tdCost,
-      avgDailyTokens: Math.round(tdTokens / activeDays),
+      avgDailyTokens: tdTokens / activeDays,
       avgDailyCost: tdCost / activeDays,
       costPerMillionTokens: tdTokens > 0 ? (tdCost / tdTokens) * 1_000_000 : 0,
       busiestDay: busiestDay.date,
       busiestDayTokens: busiestDay.tokens,
       activeDays: activeDays,
       lifetimeTypical30dCost: (totals.calculatedCost / lifetimeDays) * 30,
-      lifetimeTypical30dTokens: Math.round((allTimeTokens / lifetimeDays) * 30),
+      lifetimeTypical30dTokens: (allTimeTokens / lifetimeDays) * 30,
       lifetimeDays: lifetimeDays,
     };
 
@@ -385,6 +385,7 @@ const html = String.raw`<!doctype html>
       margin-bottom: 32px;
     }
     .card {
+      position: relative;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 18px;
@@ -403,7 +404,33 @@ const html = String.raw`<!doctype html>
     .card-value {
       font: 500 clamp(22px, 2.8vw, 34px)/1.15 var(--font);
       letter-spacing: -0.03em;
-      cursor: help;
+    }
+    .card[data-tooltip] { cursor: default; }
+    .card[data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 24px;
+      bottom: calc(100% + 10px);
+      z-index: 2;
+      max-width: min(320px, calc(100vw - 48px));
+      padding: 8px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      background: #27272a;
+      color: var(--text);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      font-size: 13px;
+      line-height: 1.35;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+    .card[data-tooltip]:hover::after,
+    .card[data-tooltip]:focus-within::after {
+      opacity: 1;
+      transform: translateY(0);
     }
     .card-context {
       margin-top: 6px;
@@ -647,36 +674,60 @@ const html = String.raw`<!doctype html>
     var tableRows = [];
     var sortState = { key: "month", direction: "asc", type: "text" };
 
+    function escapeAttr(value) {
+      return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function formatExactNumber(n) {
+      var text = String(n);
+      if (text.indexOf("e") !== -1) {
+        return n.toLocaleString(undefined, { maximumFractionDigits: 20 });
+      }
+
+      var parts = text.split(".");
+      parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+      return parts.join(".");
+    }
+
+    function truncate(n, decimals) {
+      var factor = Math.pow(10, decimals);
+      return Math.trunc(n * factor) / factor;
+    }
+
     function formatShort(n) {
       var abs = Math.abs(n);
       if (abs >= 1e9) {
-        var b = Math.round(n / 1e7) / 100;
+        var b = truncate(n / 1e9, 2);
         return b.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " billion";
       }
       if (abs >= 1e6) {
-        var m = Math.round(n / 1e6);
-        return new Intl.NumberFormat().format(m) + " million";
+        var m = truncate(n / 1e6, 2);
+        return m.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " million";
       }
-      return new Intl.NumberFormat().format(Math.round(n));
+      return formatExactNumber(n);
     }
 
     function formatShortMoney(n) {
       var abs = Math.abs(n);
       if (abs >= 1e9) {
-        var b = Math.round(n / 1e7) / 100;
+        var b = truncate(n / 1e9, 2);
         return "US$ " + b.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " billion";
       }
       if (abs >= 1e6) {
-        var m = Math.round(n / 1e6);
-        return "US$ " + new Intl.NumberFormat().format(m) + " million";
+        var m = truncate(n / 1e6, 2);
+        return "US$ " + m.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " million";
       }
-      return "US$ " + new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+      return "US$ " + truncate(n, 2).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function formatFullMoney(n) {
+      return "US$ " + formatExactNumber(n);
     }
 
     function cardMarkup(label, value, context, tooltip) {
       context = context || "";
-      var title = tooltip ? " title=\"" + tooltip.replace(/"/g, "&quot;") + "\"" : "";
-      return "<div class=\"card\"><div class=\"card-label\">" + label + "</div><div class=\"card-value\"" + title + ">" + value + "</div>" + (context ? "<div class=\"card-context\">" + context + "</div>" : "") + "</div>";
+      var tooltipAttr = tooltip ? " data-tooltip=\"" + escapeAttr(tooltip) + "\" tabindex=\"0\"" : "";
+      return "<div class=\"card\"" + tooltipAttr + "><div class=\"card-label\">" + label + "</div><div class=\"card-value\">" + value + "</div>" + (context ? "<div class=\"card-context\">" + context + "</div>" : "") + "</div>";
     }
 
     function render(data) {
@@ -693,13 +744,13 @@ const html = String.raw`<!doctype html>
 
       if (data.thirtyDay) {
         var td = data.thirtyDay;
-        cardHtml += cardMarkup("All-Time Cost", formatShortMoney(data.totals.calculatedCost), "Across all sessions", money.format(data.totals.calculatedCost));
-        cardHtml += cardMarkup("Typical 30d Cost", formatShortMoney(td.lifetimeTypical30dCost), "Projected from " + td.lifetimeDays + "d lifetime avg", money.format(td.lifetimeTypical30dCost));
-        cardHtml += cardMarkup("30d Avg Cost/Day", formatShortMoney(td.avgDailyCost), "Last 30 days, " + td.activeDays + " active days", money.format(td.avgDailyCost));
+        cardHtml += cardMarkup("All-Time Cost", formatShortMoney(data.totals.calculatedCost), "Across all sessions", formatFullMoney(data.totals.calculatedCost));
+        cardHtml += cardMarkup("Typical 30d Cost", formatShortMoney(td.lifetimeTypical30dCost), "Projected from " + td.lifetimeDays + "d lifetime avg", formatFullMoney(td.lifetimeTypical30dCost));
+        cardHtml += cardMarkup("30d Avg Cost/Day", formatShortMoney(td.avgDailyCost), "Last 30 days, " + td.activeDays + " active days", formatFullMoney(td.avgDailyCost));
 
-        cardHtml += cardMarkup("All-Time Tokens", formatShort(grandTotal), data.months.length + " months, " + data.rows.length + " model-entries", fmt.format(grandTotal));
-        cardHtml += cardMarkup("Typical 30d Tokens", formatShort(td.lifetimeTypical30dTokens), "Projected from " + td.lifetimeDays + "d lifetime avg", fmt.format(td.lifetimeTypical30dTokens));
-        cardHtml += cardMarkup("30d Avg Tokens/Day", formatShort(td.avgDailyTokens), "Last 30 days, " + td.activeDays + " active days", fmt.format(td.avgDailyTokens));
+        cardHtml += cardMarkup("All-Time Tokens", formatShort(grandTotal), data.months.length + " months, " + data.rows.length + " model-entries", formatExactNumber(grandTotal));
+        cardHtml += cardMarkup("Typical 30d Tokens", formatShort(td.lifetimeTypical30dTokens), "Projected from " + td.lifetimeDays + "d lifetime avg", formatExactNumber(td.lifetimeTypical30dTokens));
+        cardHtml += cardMarkup("30d Avg Tokens/Day", formatShort(td.avgDailyTokens), "Last 30 days, " + td.activeDays + " active days", formatExactNumber(td.avgDailyTokens));
       } else {
         cardHtml += cardMarkup("All-Time Cost", "-", "No data");
         cardHtml += cardMarkup("Typical 30d Cost", "-", "No data");
