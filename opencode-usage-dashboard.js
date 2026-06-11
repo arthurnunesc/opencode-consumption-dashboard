@@ -28,7 +28,12 @@ const GEMINI_PRICING_PER_MILLION = {
 
 function monthKey(timestamp) {
   const date = new Date(Number(timestamp));
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+  return date.getUTCFullYear() + "-" + String(date.getUTCMonth() + 1).padStart(2, "0");
+}
+
+function dayKey(timestamp) {
+  const date = new Date(Number(timestamp));
+  return date.getUTCFullYear() + "-" + String(date.getUTCMonth() + 1).padStart(2, "0") + "-" + String(date.getUTCDate()).padStart(2, "0");
 }
 
 function normalizedModel(model) {
@@ -65,7 +70,7 @@ function calculateMessageCost(provider, model, tokens, recordedCost) {
 
     return {
       cost: cny / MINIMAX_CNY_PER_USD,
-      source: `MiniMax pricing, CNY/USD ${MINIMAX_CNY_PER_USD}`,
+      source: "MiniMax pricing, CNY/USD " + MINIMAX_CNY_PER_USD,
     };
   }
 
@@ -85,7 +90,7 @@ function calculateMessageCost(provider, model, tokens, recordedCost) {
 
   return {
     cost: recordedCost,
-    source: recordedCost > 0 ? "Recorded by opencode" : "Unavailable",
+    source: recordedCost > 0 ? "Recorded by OpenCode" : "Unavailable",
   };
 }
 
@@ -93,11 +98,14 @@ function aggregateUsage() {
   const db = new Database(DB_PATH, { readonly: true });
   const maxRow = db.query("select max(rowid) as max from message").get()?.max ?? 0;
   const usage = new Map();
+  const dailyData = new Map();
+  const modelTotals = new Map();
+  let latestTimestamp = 0;
 
   for (let start = 1; start <= maxRow; start += 500) {
     const end = start + 499;
     const rows = db
-      .query(`select time_created, data from message where rowid between ${start} and ${end}`)
+      .query("select time_created, data from message where rowid between " + start + " and " + end)
       .all();
 
     for (const row of rows) {
@@ -116,15 +124,25 @@ function aggregateUsage() {
       const cacheReadTokens = Number(data.tokens.cache?.read ?? 0);
       const cacheWriteTokens = Number(data.tokens.cache?.write ?? 0);
       const recordedCost = Number(data.cost ?? 0);
+      const totalTokens = inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens;
 
-      if (inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens <= 0) {
-        continue;
-      }
+      if (totalTokens <= 0) continue;
 
-      const month = monthKey(row.time_created);
+      const timestamp = Number(row.time_created);
+      if (timestamp > latestTimestamp) latestTimestamp = timestamp;
+
       const provider = data.providerID ?? "unknown";
       const model = data.modelID ?? "unknown";
-      const key = `${month}\t${provider}\t${model}`;
+
+      const pricing = calculateMessageCost(
+        provider,
+        model,
+        { input: inputTokens, output: outputTokens, reasoning: reasoningTokens, cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens },
+        recordedCost,
+      );
+
+      const month = monthKey(timestamp);
+      const key = month + "\t" + provider + "\t" + model;
       const current = usage.get(key) ?? {
         month,
         provider,
@@ -140,19 +158,6 @@ function aggregateUsage() {
         priceSources: new Set(),
       };
 
-      const pricing = calculateMessageCost(
-        provider,
-        model,
-        {
-          input: inputTokens,
-          output: outputTokens,
-          reasoning: reasoningTokens,
-          cacheRead: cacheReadTokens,
-          cacheWrite: cacheWriteTokens,
-        },
-        recordedCost,
-      );
-
       current.calls += 1;
       current.inputTokens += inputTokens;
       current.outputTokens += outputTokens;
@@ -163,6 +168,19 @@ function aggregateUsage() {
       current.calculatedCost += pricing.cost;
       current.priceSources.add(pricing.source);
       usage.set(key, current);
+
+      const date = dayKey(timestamp);
+      const existing = dailyData.get(date) ?? { tokens: 0, cost: 0 };
+      existing.tokens += totalTokens;
+      existing.cost += pricing.cost;
+      dailyData.set(date, existing);
+
+      const modelKey = provider + "/" + model;
+      const mt = modelTotals.get(modelKey) ?? { tokens: 0, calls: 0, cost: 0 };
+      mt.tokens += totalTokens;
+      mt.calls += 1;
+      mt.cost += pricing.cost;
+      modelTotals.set(modelKey, mt);
     }
   }
 
@@ -190,25 +208,65 @@ function aggregateUsage() {
       acc.calculatedCost += row.calculatedCost;
       return acc;
     },
-    {
-      calls: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      reasoningTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 0,
-      calculatedCost: 0,
-    },
+    { calls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, calculatedCost: 0 },
   );
+
+  let thirtyDay = null;
+  let dailyBreakdown = [];
+  let modelRanking = [];
+
+  if (latestTimestamp > 0) {
+    const latestDate = new Date(latestTimestamp);
+    latestDate.setUTCHours(0, 0, 0, 0);
+    const cutoff = latestDate.getTime() - 30 * 24 * 60 * 60 * 1000;
+
+    const thirtyDayEntries = [...dailyData.entries()]
+      .filter(function ([date]) {
+        const parts = date.split("-");
+        const d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+        return d.getTime() >= cutoff;
+      });
+
+    const tdTokens = thirtyDayEntries.reduce(function (s, e) { return s + e[1].tokens; }, 0);
+    const tdCost = thirtyDayEntries.reduce(function (s, e) { return s + e[1].cost; }, 0);
+    const activeDays = thirtyDayEntries.length || 1;
+
+    let busiestDay = { date: "-", tokens: 0 };
+    for (const [d, v] of thirtyDayEntries) {
+      if (v.tokens > busiestDay.tokens) busiestDay = { date: d, tokens: v.tokens };
+    }
+
+    thirtyDay = {
+      totalTokens: tdTokens,
+      totalCost: tdCost,
+      avgDailyTokens: Math.round(tdTokens / activeDays),
+      avgDailyCost: tdCost / activeDays,
+      costPerMillionTokens: tdTokens > 0 ? (tdCost / tdTokens) * 1_000_000 : 0,
+      busiestDay: busiestDay.date,
+      busiestDayTokens: busiestDay.tokens,
+      activeDays: activeDays,
+    };
+
+    dailyBreakdown = thirtyDayEntries
+      .sort(function (a, b) { return a[0].localeCompare(b[0]); })
+      .map(function (e) { return { date: e[0], tokens: e[1].tokens, cost: e[1].cost }; });
+
+    modelRanking = [...modelTotals.entries()]
+      .sort(function (a, b) { return b[1].tokens - a[1].tokens; })
+      .slice(0, 3)
+      .map(function (e) { return { model: e[0], tokens: e[1].tokens, calls: e[1].calls, cost: e[1].cost }; });
+  }
 
   return {
     generatedAt: new Date().toISOString(),
     source: DB_PATH,
-    months: [...new Set(rows.map((row) => row.month))],
-    models: [...new Set(rows.map((row) => `${row.provider}/${row.model}`))],
-    totals,
-    rows,
+    months: [...new Set(rows.map(function (row) { return row.month; }))],
+    models: [...new Set(rows.map(function (row) { return row.provider + "/" + row.model; }))],
+    totals: totals,
+    rows: rows,
+    dailyBreakdown: dailyBreakdown,
+    thirtyDay: thirtyDay,
+    modelRanking: modelRanking,
   };
 }
 
@@ -217,183 +275,435 @@ const html = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>opencode Token Consumption</title>
+  <title>OpenCode Token Consumption</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0b0f17;
-      --panel: #121928;
-      --panel-2: #172033;
-      --text: #edf2ff;
-      --muted: #9aa9c2;
-      --grid: rgba(255, 255, 255, 0.08);
-      --line: rgba(255, 255, 255, 0.12);
+      --bg: #09090b;
+      --panel: #18181b;
+      --panel-hover: #1f1f23;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+      --muted-2: #71717a;
+      --border: rgba(255, 255, 255, 0.06);
+      --border-strong: rgba(255, 255, 255, 0.10);
+      --grid: rgba(255, 255, 255, 0.04);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; }
     body {
       margin: 0;
-      background: radial-gradient(circle at 12% 0%, #203154 0, transparent 28rem), var(--bg);
+      background: var(--bg);
       color: var(--text);
-      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 400 16px/1.55 var(--font);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
-    main { max-width: 1280px; margin: 0 auto; padding: 32px 20px 48px; }
-    header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; margin-bottom: 24px; }
-    h1 { margin: 0; font-size: clamp(28px, 5vw, 56px); letter-spacing: -0.06em; line-height: 0.95; }
-    .subtitle { margin-top: 10px; color: var(--muted); max-width: 760px; }
-    .pill { padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); white-space: nowrap; }
-    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
-    .card, .panel { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)), var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 18px 60px rgba(0,0,0,0.28); }
-    .card { padding: 18px; }
-    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; }
-    .value { margin-top: 8px; font-size: clamp(22px, 3vw, 34px); font-weight: 800; letter-spacing: -0.04em; }
-    .panel { padding: 18px; margin-top: 14px; overflow: hidden; }
-    .chart-wrap { overflow-x: auto; padding-bottom: 8px; }
-    .chart { min-width: 860px; height: 440px; display: grid; grid-template-columns: 54px 1fr; grid-template-rows: 1fr 42px; gap: 0 12px; }
-    .axis { grid-row: 1; display: flex; flex-direction: column; justify-content: space-between; color: var(--muted); font-size: 12px; text-align: right; padding-right: 4px; }
-    .plot { position: relative; grid-column: 2; grid-row: 1; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); display: flex; align-items: end; gap: 24px; padding: 0 18px; }
-    .plot::before { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(to top, var(--grid), var(--grid) 1px, transparent 1px, transparent 20%); pointer-events: none; }
-    .bar-group { position: relative; z-index: 1; flex: 1; min-width: 90px; height: 100%; display: flex; align-items: end; justify-content: center; }
-    .bar { width: min(72px, 70%); min-height: 1px; border-radius: 10px 10px 0 0; overflow: hidden; background: var(--panel-2); display: flex; flex-direction: column-reverse; box-shadow: 0 12px 30px rgba(0,0,0,0.28); }
-    .segment { width: 100%; min-height: 1px; border-top: 1px solid rgba(255,255,255,0.18); }
-    .x-axis { grid-column: 2; grid-row: 2; display: flex; gap: 24px; padding: 10px 18px 0; color: var(--muted); }
-    .x-axis div { flex: 1; min-width: 90px; text-align: center; }
-    .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; color: var(--muted); }
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      pointer-events: none;
+      opacity: 0.025;
+      background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+      background-size: 256px 256px;
+    }
+    main { max-width: 1280px; margin: 0 auto; padding: 48px 28px 64px; }
+    header { margin-bottom: 36px; }
+    h1 {
+      margin: 0;
+      font: 500 clamp(32px, 5vw, 54px)/0.95 var(--font);
+      letter-spacing: -0.04em;
+    }
+    .subtitle {
+      margin-top: 12px;
+      color: var(--muted);
+      max-width: 680px;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    .pill {
+      display: inline-block;
+      margin-top: 16px;
+      padding: 7px 14px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted-2);
+      font-size: 13px;
+      font-weight: 400;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 32px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px 26px;
+      transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease;
+    }
+    .card:active { transform: scale(0.99); }
+    .card-label {
+      color: var(--muted-2);
+      font-size: 12px;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.10em;
+      margin-bottom: 8px;
+    }
+    .card-value {
+      font: 500 clamp(22px, 2.8vw, 34px)/1.15 var(--font);
+      letter-spacing: -0.03em;
+    }
+    .card-context {
+      margin-top: 6px;
+      color: var(--muted-2);
+      font-size: 13px;
+      font-weight: 400;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 26px 28px;
+      margin-bottom: 20px;
+    }
+    .panel-label {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 18px;
+      letter-spacing: -0.01em;
+    }
+
+    .chart-wrap { overflow-x: auto; padding-bottom: 6px; }
+    .chart {
+      min-width: 920px;
+      height: 440px;
+      display: grid;
+      grid-template-columns: 64px 1fr;
+      grid-template-rows: 1fr 40px;
+      gap: 0 14px;
+    }
+    .axis {
+      grid-row: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      color: var(--muted-2);
+      font-size: 12px;
+      text-align: right;
+      padding-right: 6px;
+    }
+    .plot {
+      position: relative;
+      grid-column: 2;
+      grid-row: 1;
+      border-left: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: end;
+      gap: 32px;
+      padding: 0 24px;
+    }
+    .plot::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(to top, var(--grid), var(--grid) 1px, transparent 1px, transparent 20%);
+      pointer-events: none;
+    }
+    .bar-group {
+      position: relative;
+      z-index: 1;
+      flex: 1;
+      min-width: 90px;
+      height: 100%;
+      display: flex;
+      align-items: end;
+      justify-content: center;
+    }
+    .bar {
+      width: min(76px, 68%);
+      min-height: 1px;
+      border-radius: 8px 8px 0 0;
+      overflow: hidden;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column-reverse;
+      transition: filter 200ms ease, transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .bar-group:hover .bar {
+      filter: brightness(1.12);
+      transform: translateY(-2px);
+    }
+    .segment {
+      width: 100%;
+      min-height: 1px;
+      transition: filter 120ms ease;
+    }
+    .segment:hover { filter: brightness(1.15) saturate(1.1); }
+    .x-axis {
+      grid-column: 2;
+      grid-row: 2;
+      display: flex;
+      gap: 32px;
+      padding: 10px 24px 0;
+      color: var(--muted-2);
+    }
+    .x-axis div { flex: 1; min-width: 90px; text-align: center; font-size: 12px; }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
     .legend span { display: inline-flex; align-items: center; gap: 7px; }
-    .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-    table { width: 100%; border-collapse: collapse; min-width: 980px; }
-    th, td { padding: 11px 10px; border-bottom: 1px solid var(--line); text-align: right; }
-    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
-    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; position: sticky; top: 0; background: var(--panel); }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
     .table-wrap { overflow: auto; max-height: 560px; }
-    .error { border-color: rgba(255, 96, 96, 0.45); color: #ffb4b4; padding: 18px; }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
+    th, td { padding: 12px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+    th {
+      color: var(--muted-2);
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      cursor: pointer;
+      user-select: none;
+    }
+    th::after {
+      content: "";
+      display: inline-block;
+      margin-left: 4px;
+      vertical-align: middle;
+      opacity: 0;
+      transition: opacity 150ms ease;
+    }
+    th:hover::after { opacity: 0.35; }
+    th.sort-asc::after {
+      opacity: 1;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-bottom: 5px solid var(--muted);
+    }
+    th.sort-desc::after {
+      opacity: 1;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid var(--muted);
+    }
+    td { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    .error-panel {
+      border-color: rgba(239, 68, 68, 0.18);
+      background: linear-gradient(180deg, rgba(239, 68, 68, 0.04), transparent), var(--panel);
+      color: #fca5a5;
+      padding: 20px 24px;
+      border-radius: 20px;
+    }
+    .error-panel .error-title { color: #f87171; font-weight: 500; margin-bottom: 4px; }
+
+    .skeleton {
+      background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.03) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 6px;
+    }
+    .skeleton-label { height: 12px; width: 84px; margin-bottom: 12px; }
+    .skeleton-value { height: 30px; width: 150px; }
+    .skeleton-chart { height: 440px; width: 100%; border-radius: 12px; }
+    .skeleton-row { height: 40px; width: 100%; border-radius: 6px; margin-bottom: 6px; }
+
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
     @media (max-width: 760px) {
-      header { display: block; }
-      .pill { display: inline-block; margin-top: 14px; }
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .card { padding: 18px 20px; }
+      .card-value { font-size: clamp(18px, 5vw, 26px); }
+      main { padding: 32px 16px 44px; }
     }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <div>
-        <h1>opencode Token Consumption</h1>
-        <div class="subtitle">Monthly usage grouped by model. Each column is one month; each colored stack is a model. The table below breaks down input tokens, output tokens, reasoning/cache tokens, calls, and recorded price.</div>
-      </div>
+      <h1>OpenCode Token Consumption</h1>
+      <div class="subtitle">Token usage and cost estimation across all providers. Monthly breakdown grouped by model, plus 30-day rolling averages.</div>
       <div class="pill" id="generated">Loading...</div>
     </header>
 
-    <section class="cards">
-      <div class="card"><div class="label">Total Tokens</div><div class="value" id="totalTokens">-</div></div>
-      <div class="card"><div class="label">Input Tokens</div><div class="value" id="inputTokens">-</div></div>
-      <div class="card"><div class="label">Output Tokens</div><div class="value" id="outputTokens">-</div></div>
-      <div class="card"><div class="label">Calculated Price</div><div class="value" id="cost">-</div></div>
+    <section class="cards" id="cards">
+      <div class="card"><div class="skeleton skeleton-label"></div><div class="skeleton skeleton-value"></div></div>
+      <div class="card"><div class="skeleton skeleton-label"></div><div class="skeleton skeleton-value"></div></div>
+      <div class="card"><div class="skeleton skeleton-label"></div><div class="skeleton skeleton-value"></div></div>
+      <div class="card"><div class="skeleton skeleton-label"></div><div class="skeleton skeleton-value"></div></div>
+      <div class="card"><div class="skeleton skeleton-label"></div><div class="skeleton skeleton-value"></div></div>
+      <div class="card"><div class="skeleton skeleton-label"></div><div class="skeleton skeleton-value"></div></div>
     </section>
 
-    <section class="panel">
-      <div class="chart-wrap"><div class="chart" id="chart"></div></div>
-      <div class="legend" id="legend"></div>
-    </section>
+    <div class="panel" id="chartPanel">
+      <div class="panel-label">Monthly Breakdown</div>
+      <div class="skeleton skeleton-chart"></div>
+    </div>
 
-    <section class="panel">
+    <div class="panel" id="tablePanel">
+      <div class="panel-label">Details</div>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th data-key="month" data-type="text">Month</th><th data-key="modelLabel" data-type="text">Model</th><th data-key="calls" data-type="number">Calls</th><th data-key="inputTokens" data-type="number">Input</th><th data-key="outputTokens" data-type="number">Output</th><th data-key="reasoningTokens" data-type="number">Reasoning</th><th data-key="cacheReadTokens" data-type="number">Cache Read</th><th data-key="cacheWriteTokens" data-type="number">Cache Write</th><th data-key="totalTokens" data-type="number">Total</th><th data-key="calculatedCost" data-type="number">Price</th><th data-key="priceSource" data-type="text">Price Source</th>
+              <th data-key="month" data-type="text">Month</th>
+              <th data-key="modelLabel" data-type="text">Model</th>
+              <th data-key="calls" data-type="number">Calls</th>
+              <th data-key="inputTokens" data-type="number">Input</th>
+              <th data-key="outputTokens" data-type="number">Output</th>
+              <th data-key="reasoningTokens" data-type="number">Reasoning</th>
+              <th data-key="cacheReadTokens" data-type="number">Cache Rd</th>
+              <th data-key="cacheWriteTokens" data-type="number">Cache Wr</th>
+              <th data-key="totalTokens" data-type="number">Total</th>
+              <th data-key="calculatedCost" data-type="number">Price</th>
+              <th data-key="priceSource" data-type="text">Source</th>
             </tr>
           </thead>
-          <tbody id="rows"></tbody>
+          <tbody id="rows">
+            <tr><td colspan="11" style="text-align:center;padding:32px;color:var(--muted-2)">Loading...</td></tr>
+          </tbody>
         </table>
       </div>
-    </section>
+    </div>
   </main>
   <script>
-    const colors = ["#7dd3fc", "#c084fc", "#f472b6", "#fb7185", "#fbbf24", "#34d399", "#60a5fa", "#a3e635", "#f97316", "#2dd4bf", "#e879f9", "#93c5fd"];
-    const fmt = new Intl.NumberFormat();
-    const money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 });
-    const total = row => row.inputTokens + row.outputTokens + row.reasoningTokens + row.cacheReadTokens + row.cacheWriteTokens;
-    let tableRows = [];
-    let sortState = { key: "month", direction: "asc", type: "text" };
+    var colors = ["#a5d8ff","#ffc9de","#b2f2bb","#ffd8a8","#d0bfff","#96f2d7","#99e9f2","#fcc2d7","#b2ddff","#ffb3ba","#d4f0c0","#ffe0b2"];
+    var fmt = new Intl.NumberFormat();
+    var money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 4 });
+    function tokenTotal(row) { return row.inputTokens + row.outputTokens + row.reasoningTokens + row.cacheReadTokens + row.cacheWriteTokens; }
+    var tableRows = [];
+    var sortState = { key: "month", direction: "asc", type: "text" };
+
+    function cardMarkup(label, value, context) {
+      context = context || "";
+      return "<div class=\"card\"><div class=\"card-label\">" + label + "</div><div class=\"card-value\">" + value + "</div>" + (context ? "<div class=\"card-context\">" + context + "</div>" : "") + "</div>";
+    }
 
     function render(data) {
-      const modelColors = Object.fromEntries(data.models.map((model, index) => [model, colors[index % colors.length]]));
-      const monthTotals = Object.fromEntries(data.months.map(month => [month, data.rows.filter(row => row.month === month).reduce((sum, row) => sum + total(row), 0)]));
-      const max = Math.max(...Object.values(monthTotals), 1);
-      const grandTotal = data.totals.inputTokens + data.totals.outputTokens + data.totals.reasoningTokens + data.totals.cacheReadTokens + data.totals.cacheWriteTokens;
+      var modelColors = {};
+      data.models.forEach(function(model, i) { modelColors[model] = colors[i % colors.length]; });
+      var monthTotals = {};
+      data.months.forEach(function(month) { monthTotals[month] = data.rows.filter(function(r) { return r.month === month; }).reduce(function(s, r) { return s + tokenTotal(r); }, 0); });
+      var max = Math.max.apply(null, Object.values(monthTotals).concat([1]));
+      var grandTotal = tokenTotal(data.totals);
 
       document.getElementById("generated").textContent = "Generated " + new Date(data.generatedAt).toLocaleString();
-      document.getElementById("totalTokens").textContent = fmt.format(grandTotal);
-      document.getElementById("inputTokens").textContent = fmt.format(data.totals.inputTokens);
-      document.getElementById("outputTokens").textContent = fmt.format(data.totals.outputTokens);
-      document.getElementById("cost").textContent = money.format(data.totals.calculatedCost);
 
-      const marks = [1, 0.75, 0.5, 0.25, 0].map(value => "<div>" + fmt.format(Math.round(max * value)) + "</div>").join("");
-      const bars = data.months.map(month => {
-        const height = monthTotals[month] / max * 100;
-        const segments = data.rows.filter(row => row.month === month).map(row => {
-          const model = row.provider + "/" + row.model;
-          const segmentHeight = total(row) / monthTotals[month] * 100;
-          const title = month + " " + model + "\nTotal: " + fmt.format(total(row)) + "\nInput: " + fmt.format(row.inputTokens) + "\nOutput: " + fmt.format(row.outputTokens) + "\nPrice: " + money.format(row.calculatedCost) + "\nSource: " + row.priceSource;
-          return "<div class=\"segment\" title=\"" + title + "\" style=\"height:" + segmentHeight + "%;background:" + modelColors[model] + "\"></div>";
+      var cardHtml = "";
+
+      cardHtml += cardMarkup("All-Time Tokens", fmt.format(grandTotal), data.rows.length + " entries across " + data.months.length + " months");
+
+      cardHtml += cardMarkup("All-Time Cost", money.format(data.totals.calculatedCost), "Calculated from provider pricing");
+
+      if (data.thirtyDay) {
+        var td = data.thirtyDay;
+        cardHtml += cardMarkup("30d Avg Tokens/Day", fmt.format(td.avgDailyTokens), td.activeDays + " active days");
+        cardHtml += cardMarkup("30d Avg Cost/Day", money.format(td.avgDailyCost), td.activeDays + " active days");
+        cardHtml += cardMarkup("30d Cost / 1M Tokens", money.format(td.costPerMillionTokens), "Effective blended rate");
+        cardHtml += cardMarkup("30d Peak Day", fmt.format(td.busiestDayTokens), td.busiestDay !== "-" ? td.busiestDay : "No data");
+      } else {
+        cardHtml += cardMarkup("30d Avg Tokens/Day", "-", "No data");
+        cardHtml += cardMarkup("30d Avg Cost/Day", "-", "No data");
+        cardHtml += cardMarkup("30d Cost / 1M Tokens", "-", "No data");
+        cardHtml += cardMarkup("30d Peak Day", "-", "No data");
+      }
+
+      document.getElementById("cards").innerHTML = cardHtml;
+
+      var marks = [1, 0.75, 0.5, 0.25, 0].map(function(v) {
+        return "<div>" + fmt.format(Math.round(max * v)) + "</div>";
+      }).join("");
+
+      var bars = data.months.map(function(month) {
+        var height = monthTotals[month] / max * 100;
+        var segments = data.rows.filter(function(r) { return r.month === month; }).map(function(row) {
+          var model = row.provider + "/" + row.model;
+          var segH = tokenTotal(row) / monthTotals[month] * 100;
+          var title = month + "  " + model + "\nTotal: " + fmt.format(tokenTotal(row)) + "  Input: " + fmt.format(row.inputTokens) + "  Output: " + fmt.format(row.outputTokens) + "\nCost: " + money.format(row.calculatedCost) + "  Source: " + row.priceSource;
+          return "<div class=\"segment\" title=\"" + title + "\" style=\"height:" + segH + "%;background:" + modelColors[model] + "\"></div>";
         }).join("");
         return "<div class=\"bar-group\"><div class=\"bar\" style=\"height:" + height + "%\">" + segments + "</div></div>";
       }).join("");
-      const labels = data.months.map(month => "<div>" + month + "</div>").join("");
-      document.getElementById("chart").innerHTML = "<div class=\"axis\">" + marks + "</div><div class=\"plot\">" + bars + "</div><div class=\"x-axis\">" + labels + "</div>";
-      document.getElementById("legend").innerHTML = data.models.map(model => "<span><i class=\"swatch\" style=\"background:" + modelColors[model] + "\"></i>" + model + "</span>").join("");
 
-      tableRows = data.rows.map(row => ({
-        ...row,
-        modelLabel: row.provider + "/" + row.model,
-        totalTokens: total(row),
-      }));
-      document.querySelectorAll("th[data-key]").forEach(th => {
-        th.style.cursor = "pointer";
-        th.title = "Click to sort";
-        th.addEventListener("click", () => {
-          const key = th.dataset.key;
-          const type = th.dataset.type;
+      var labels = data.months.map(function(month) { return "<div>" + month + "</div>"; }).join("");
+      var legend = data.models.map(function(m) { return "<span><i class=\"swatch\" style=\"background:" + modelColors[m] + "\"></i>" + m + "</span>"; }).join("");
+
+      document.getElementById("chartPanel").innerHTML = "<div class=\"panel-label\">Monthly Breakdown</div><div class=\"chart-wrap\"><div class=\"chart\"><div class=\"axis\">" + marks + "</div><div class=\"plot\">" + bars + "</div><div class=\"x-axis\">" + labels + "</div></div></div><div class=\"legend\">" + legend + "</div>";
+
+      tableRows = data.rows.map(function(row) {
+        var r = Object.assign({}, row);
+        r.modelLabel = row.provider + "/" + row.model;
+        r.totalTokens = tokenTotal(row);
+        return r;
+      });
+
+      document.querySelectorAll("th[data-key]").forEach(function(th) {
+        th.addEventListener("click", function() {
+          var key = th.dataset.key;
+          var type = th.dataset.type;
           sortState = {
-            key,
-            type,
+            key: key,
+            type: type,
             direction: sortState.key === key && sortState.direction === "desc" ? "asc" : "desc",
           };
           renderRows();
         });
       });
+
       renderRows();
     }
 
     function renderRows() {
-      const rows = [...tableRows].sort((a, b) => {
-        const aValue = a[sortState.key];
-        const bValue = b[sortState.key];
-        const result = sortState.type === "number"
-          ? Number(aValue ?? 0) - Number(bValue ?? 0)
-          : String(aValue ?? "").localeCompare(String(bValue ?? ""));
-        return sortState.direction === "asc" ? result : -result;
+      var rows = tableRows.slice().sort(function(a, b) {
+        var av = a[sortState.key], bv = b[sortState.key];
+        var r = sortState.type === "number" ? (Number(av ?? 0) - Number(bv ?? 0)) : String(av ?? "").localeCompare(String(bv ?? ""));
+        return sortState.direction === "asc" ? r : -r;
       });
 
-      document.querySelectorAll("th[data-key]").forEach(th => {
-        const label = th.textContent.replace(/ [▲▼]$/, "");
-        th.textContent = label + (th.dataset.key === sortState.key ? (sortState.direction === "asc" ? " ▲" : " ▼") : "");
+      document.querySelectorAll("th[data-key]").forEach(function(th) {
+        th.classList.remove("sort-asc", "sort-desc");
       });
+      var activeTh = document.querySelector("th[data-key=\"" + sortState.key + "\"]");
+      if (activeTh) activeTh.classList.add(sortState.direction === "asc" ? "sort-asc" : "sort-desc");
 
-      document.getElementById("rows").innerHTML = rows.map(row => {
-        const model = row.provider + "/" + row.model;
-        return "<tr><td>" + row.month + "</td><td>" + model + "</td><td>" + fmt.format(row.calls) + "</td><td>" + fmt.format(row.inputTokens) + "</td><td>" + fmt.format(row.outputTokens) + "</td><td>" + fmt.format(row.reasoningTokens) + "</td><td>" + fmt.format(row.cacheReadTokens) + "</td><td>" + fmt.format(row.cacheWriteTokens) + "</td><td>" + fmt.format(row.totalTokens) + "</td><td>" + money.format(row.calculatedCost) + "</td><td>" + row.priceSource + "</td></tr>";
+      document.getElementById("rows").innerHTML = rows.map(function(row) {
+        return "<tr><td>" + row.month + "</td><td>" + (row.provider + "/" + row.model) + "</td><td>" + fmt.format(row.calls) + "</td><td>" + fmt.format(row.inputTokens) + "</td><td>" + fmt.format(row.outputTokens) + "</td><td>" + fmt.format(row.reasoningTokens) + "</td><td>" + fmt.format(row.cacheReadTokens) + "</td><td>" + fmt.format(row.cacheWriteTokens) + "</td><td>" + fmt.format(row.totalTokens) + "</td><td>" + money.format(row.calculatedCost) + "</td><td>" + row.priceSource + "</td></tr>";
       }).join("");
     }
 
     fetch("/api/usage")
-      .then(response => {
+      .then(function(response) {
         if (!response.ok) throw new Error("HTTP " + response.status);
         return response.json();
       })
       .then(render)
-      .catch(error => {
-        document.querySelector("main").insertAdjacentHTML("beforeend", "<section class=\"panel error\">Could not load usage data: " + error.message + "</section>");
+      .catch(function(error) {
+        var errHtml = "<section class=\"error-panel\"><div class=\"error-title\">Could not load usage data</div>" + error.message + "</section>";
+        document.getElementById("cards").insertAdjacentHTML("afterend", errHtml);
       });
   </script>
 </body>
@@ -418,5 +728,5 @@ Bun.serve({
   },
 });
 
-console.log(`opencode usage dashboard: http://localhost:${PORT}`);
-console.log(`database: ${DB_PATH}`);
+console.log("OpenCode usage dashboard: http://localhost:" + PORT);
+console.log("database: " + DB_PATH);
