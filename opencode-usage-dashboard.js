@@ -545,6 +545,8 @@ const html = String.raw`<!doctype html>
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { padding: 12px 10px; border-bottom: 1px solid var(--border); text-align: right; }
     th { text-align: center; }
+    th { white-space: nowrap; }
+    td:nth-child(10) { white-space: nowrap; }
     td:first-child, td:nth-child(2) { text-align: left; }
     th {
       color: var(--muted-2);
@@ -724,6 +726,10 @@ const html = String.raw`<!doctype html>
       return "US$ " + formatExactNumber(n);
     }
 
+    function formatTableMoney(n) {
+      return "US$ " + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
     function cardMarkup(label, value, context, tooltip) {
       context = context || "";
       var tooltipAttr = tooltip ? " data-tooltip=\"" + escapeAttr(tooltip) + "\" tabindex=\"0\"" : "";
@@ -819,7 +825,7 @@ const html = String.raw`<!doctype html>
       if (activeTh) activeTh.classList.add(sortState.direction === "asc" ? "sort-asc" : "sort-desc");
 
       document.getElementById("rows").innerHTML = rows.map(function(row) {
-        return "<tr><td>" + row.month + "</td><td>" + (row.provider + "/" + row.model) + "</td><td>" + fmt.format(row.calls) + "</td><td>" + fmt.format(row.inputTokens) + "</td><td>" + fmt.format(row.outputTokens) + "</td><td>" + fmt.format(row.reasoningTokens) + "</td><td>" + fmt.format(row.cacheReadTokens) + "</td><td>" + fmt.format(row.cacheWriteTokens) + "</td><td>" + fmt.format(row.totalTokens) + "</td><td>" + money.format(row.calculatedCost) + "</td><td>" + row.priceSource + "</td></tr>";
+        return "<tr><td>" + row.month + "</td><td>" + (row.provider + "/" + row.model) + "</td><td>" + fmt.format(row.calls) + "</td><td>" + fmt.format(row.inputTokens) + "</td><td>" + fmt.format(row.outputTokens) + "</td><td>" + fmt.format(row.reasoningTokens) + "</td><td>" + fmt.format(row.cacheReadTokens) + "</td><td>" + fmt.format(row.cacheWriteTokens) + "</td><td>" + fmt.format(row.totalTokens) + "</td><td>" + formatTableMoney(row.calculatedCost) + "</td><td>" + row.priceSource + "</td></tr>";
       }).join("");
     }
 
