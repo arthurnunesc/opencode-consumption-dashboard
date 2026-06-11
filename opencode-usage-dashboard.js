@@ -369,6 +369,7 @@ const html = String.raw`<!doctype html>
     .card-value {
       font: 500 clamp(22px, 2.8vw, 34px)/1.15 var(--font);
       letter-spacing: -0.03em;
+      cursor: help;
     }
     .card-context {
       margin-top: 6px;
@@ -607,9 +608,10 @@ const html = String.raw`<!doctype html>
     var tableRows = [];
     var sortState = { key: "month", direction: "asc", type: "text" };
 
-    function cardMarkup(label, value, context) {
+    function cardMarkup(label, value, context, tooltip) {
       context = context || "";
-      return "<div class=\"card\"><div class=\"card-label\">" + label + "</div><div class=\"card-value\">" + value + "</div>" + (context ? "<div class=\"card-context\">" + context + "</div>" : "") + "</div>";
+      var title = tooltip ? " title=\"" + tooltip.replace(/"/g, "&quot;") + "\"" : "";
+      return "<div class=\"card\"><div class=\"card-label\">" + label + "</div><div class=\"card-value\"" + title + ">" + value + "</div>" + (context ? "<div class=\"card-context\">" + context + "</div>" : "") + "</div>";
     }
 
     function render(data) {
