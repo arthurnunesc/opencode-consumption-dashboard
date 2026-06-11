@@ -499,23 +499,25 @@ const html = String.raw`<!doctype html>
     th::after {
       content: "";
       display: inline-block;
+      width: 0;
+      height: 0;
       margin-left: 4px;
       vertical-align: middle;
       opacity: 0;
       transition: opacity 150ms ease;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-bottom: 5px solid transparent;
     }
     th:hover::after { opacity: 0.35; }
     th.sort-asc::after {
       opacity: 1;
-      border-left: 4px solid transparent;
-      border-right: 4px solid transparent;
-      border-bottom: 5px solid var(--muted);
+      border-bottom-color: var(--muted);
     }
     th.sort-desc::after {
       opacity: 1;
-      border-left: 4px solid transparent;
-      border-right: 4px solid transparent;
-      border-top: 5px solid var(--muted);
+      border-bottom-color: var(--muted);
+      transform: rotate(180deg);
     }
     td { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
